@@ -154,26 +154,88 @@ const DEMO_PRODUCTS = [
   { id:"d6", title:"Smartwatch Fitness Band X", price:"R$ 199,90", original_price:"",          image:"https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400&q=80", category:"Eletrônicos",platform:"mercadolivre", original_url:"#" },
 ];
 
+function detectPlatform(url) {
+  if (url.includes("shopee")) return "shopee";
+  if (url.includes("mercadolivre") || url.includes("mercadolibre")) return "mercadolivre";
+  if (url.includes("amazon")) return "amazon";
+  return "unknown";
+}
+
+function decodeHTML(str) {
+  return str.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&nbsp;/g," ");
+}
+
+const CAT_KEYWORDS = {
+  "Eletrônicos": ["eletrônico","eletronico","electronic","celular","smartphone","notebook","computador","tablet","tv ","televisor","fone","headphone","camera","câmera","console","gamer","informática","informatica","audio","áudio"],
+  "Moda":        ["moda","roupa","camiseta","calça","calca","vestido","sapato","tenis","tênis","bolsa","fashion","clothing","apparel","shoe","sneaker","jaqueta"],
+  "Casa":        ["casa","cama","banho","decoração","decoracao","home","furniture","movel","móvel","cozinha","jardim","organiz","limpeza"],
+  "Beleza":      ["beleza","beauty","cosmético","cosmetico","skincare","maquiagem","perfume","cabelo","shampoo"],
+  "Esportes":    ["esporte","sport","fitness","academia","bicicleta","futebol","natacao","natação","corrida","musculação"],
+  "Brinquedos":  ["brinquedo","toy","infantil","crianca","criança","boneca","lego"],
+  "Livros":      ["livro","book","literatura","revista"],
+  "Alimentos":   ["alimento","food","comida","bebida","suplemento","proteína","proteina","vitamina"],
+};
+
+function mapCategory(text) {
+  if (!text) return "Outros";
+  const lower = text.toLowerCase();
+  for (const [cat, kws] of Object.entries(CAT_KEYWORDS)) {
+    if (kws.some(k => lower.includes(k))) return cat;
+  }
+  return "Outros";
+}
+
 async function fetchProductMeta(url) {
-  let platform = "unknown";
-  if (url.includes("shopee")) platform = "shopee";
-  else if (url.includes("mercadolivre") || url.includes("mercadolibre")) platform = "mercadolivre";
-  else if (url.includes("amazon")) platform = "amazon";
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514", max_tokens: 1000,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: `Busque o produto neste link: ${url}\n\nRetorne SOMENTE um JSON:\n{"title":"...","price":"R$ XX,XX","original_price":"R$ XX,XX se houver promoção, senão vazio","image":"url_imagem","category":"categoria","platform":"${platform}","original_url":"${url}"}\n\nSe não achar algum campo, use "".` }]
-    })
-  });
-  const data = await res.json();
-  const text = data.content?.find(b => b.type === "text")?.text || "";
+  const platform = detectPlatform(url);
+  const base = { id: crypto.randomUUID(), title:"", price:"", original_price:"", image:"", category:"Outros", platform, original_url: url };
+
   try {
-    const m = text.replace(/```json|```/g, "").trim().match(/\{[\s\S]*\}/);
-    if (m) return { ...JSON.parse(m[0]), platform, id: crypto.randomUUID() };
-  } catch {}
-  return { id: crypto.randomUUID(), title: "Produto", price: "", original_price: "", image: "", category: "Outros", platform, original_url: url };
+    const proxyRes = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+    if (!proxyRes.ok) return base;
+    const { contents: html } = await proxyRes.json();
+    if (!html) return base;
+
+    const getTag = (...patterns) => {
+      for (const p of patterns) { const m = html.match(p); if (m?.[1]) return decodeHTML(m[1].trim()); }
+      return "";
+    };
+
+    // JSON-LD structured data (most reliable)
+    const ldBlocks = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+    for (const [, raw] of ldBlocks) {
+      try {
+        let ld = JSON.parse(raw);
+        if (Array.isArray(ld)) ld = ld.find(x => x?.["@type"] === "Product");
+        if (!ld || ld["@type"] !== "Product") continue;
+        const imgRaw = ld.image;
+        const img = imgRaw ? (Array.isArray(imgRaw) ? imgRaw[0] : (typeof imgRaw === "string" ? imgRaw : imgRaw?.url)) : "";
+        let price = "", origPrice = "";
+        const offers = ld.offers ? (Array.isArray(ld.offers) ? ld.offers : [ld.offers]) : [];
+        if (offers.length) {
+          const prices = offers.map(o => parseFloat(o.price)).filter(Boolean).sort((a,b) => a-b);
+          if (prices.length) price = `R$ ${prices[0].toFixed(2).replace(".",",")}`;
+          if (prices.length > 1) origPrice = `R$ ${prices[prices.length-1].toFixed(2).replace(".",",")}`;
+        }
+        const cat = mapCategory((ld.category||"") + " " + (ld.name||""));
+        return { ...base, title: ld.name || "", image: img || "", price, original_price: origPrice, category: cat };
+      } catch {}
+    }
+
+    // OG tags fallback
+    const title = getTag(
+      /property=["']og:title["'][^>]*content=["']([^"']+)/i,
+      /content=["']([^"']+)["'][^>]*property=["']og:title["']/i,
+      /<title[^>]*>([^<]+)<\/title>/i
+    );
+    const image = getTag(
+      /property=["']og:image["'][^>]*content=["']([^"']+)/i,
+      /content=["']([^"']+)["'][^>]*property=["']og:image["']/i
+    );
+    const category = mapCategory(title + " " + url);
+    return { ...base, title, image, category };
+  } catch {
+    return base;
+  }
 }
 
 // ─── Shared input style factory ───────────────────────────────────────────────
@@ -448,15 +510,15 @@ function AddProductModal({ onAdd, onClose, T, F }) {
   const is = iStyle(T, F);
 
   async function handle() {
-    if (!url.trim()) return setErr("Cole o link do produto.");
-    const valid = url.includes("shopee")||url.includes("mercadolivre")||url.includes("mercadolibre")||url.includes("amazon");
-    if (!valid) return setErr("Use links da Shopee, Mercado Livre ou Amazon.");
+    const trimmed = url.trim();
+    if (!trimmed) return setErr("Cole o link do produto.");
+    if (!trimmed.startsWith("http")) return setErr("Link inválido.");
     setErr(""); setLoading(true);
     try {
-      const p = await fetchProductMeta(url.trim());
+      const p = await fetchProductMeta(trimmed);
       if (manualCat) p.category = manualCat;
       onAdd(p); onClose();
-    } catch { setErr("Não foi possível buscar o produto."); }
+    } catch { setErr("Não foi possível buscar o produto. Tente novamente."); }
     setLoading(false);
   }
 
@@ -468,7 +530,7 @@ function AddProductModal({ onAdd, onClose, T, F }) {
           <button onClick={onClose} style={{ background:"none", border:"none", fontSize:20, cursor:"pointer", color:T.textSub }}>✕</button>
         </div>
         <label style={{ display:"block", fontSize:11, fontWeight:700, color:T.textSub, marginBottom:5, fontFamily:F.body, letterSpacing:0.6 }}>LINK DO PRODUTO *</label>
-        <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="Shopee, Mercado Livre ou Amazon" style={is}
+        <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="Shopee, Mercado Livre, Amazon..." style={is}
           onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border} />
         <label style={{ display:"block", fontSize:11, fontWeight:700, color:T.textSub, margin:"14px 0 5px", fontFamily:F.body, letterSpacing:0.6 }}>CATEGORIA (opcional)</label>
         <select value={manualCat} onChange={e=>setManualCat(e.target.value)} style={{ ...is, cursor:"pointer" }}>
@@ -484,27 +546,160 @@ function AddProductModal({ onAdd, onClose, T, F }) {
   );
 }
 
+// ─── Storefront View (shared by owner and public) ─────────────────────────────
+function StorefrontView({ profile, products, isOwner, theme, fonts, showEmoji, onDelete, onAdd, onAppearanceChange, onSignOut }) {
+  const [search, setSearch]           = useState("");
+  const [activeCategory, setActiveCategory] = useState("Todos");
+  const [showAddModal, setShowAddModal]     = useState(false);
+  const [showAppearance, setShowAppearance] = useState(false);
+
+  const T = THEMES[theme]; const F = FONT_PAIRS[fonts];
+  const allCategories = ["Todos", ...Array.from(new Set(products.map(p=>p.category).filter(Boolean)))];
+  const filtered = products.filter(p => {
+    const matchCat = activeCategory==="Todos"||p.category===activeCategory;
+    const matchSearch = !search||p.title.toLowerCase().includes(search.toLowerCase())||p.category?.toLowerCase().includes(search.toLowerCase());
+    return matchCat && matchSearch;
+  });
+
+  return (
+    <div style={{ minHeight:"100vh", background:T.bg, fontFamily:F.body }}>
+      <style>{`
+        @import url('${F.import}');
+        * { box-sizing:border-box; }
+        ::-webkit-scrollbar { width:4px; height:4px; }
+        ::-webkit-scrollbar-thumb { background:${T.scrollThumb}; border-radius:4px; }
+        ::-webkit-scrollbar-track { background:transparent; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ background:T.header, borderBottom:`1px solid ${T.border}`, padding:"18px 16px 0", position:"sticky", top:0, zIndex:50 }}>
+        <div style={{ maxWidth:640, margin:"0 auto" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
+            {profile.avatar_url
+              ? <img src={profile.avatar_url} alt={profile.name} style={{ width:50, height:50, borderRadius:"50%", objectFit:"cover", border:`2.5px solid ${T.accent}`, flexShrink:0 }} onError={e=>e.target.style.display="none"} />
+              : <Avatar name={profile.name} T={T} F={F} />}
+            <div style={{ flex:1, minWidth:0 }}>
+              <h1 style={{ margin:0, fontFamily:F.heading, fontSize:17, fontWeight:800, color:T.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{profile.name}</h1>
+              <div style={{ display:"flex", alignItems:"center", gap:5, marginTop:1 }}>
+                <span style={{ fontSize:11, color:T.accent, fontWeight:600, fontFamily:F.body }}>{window.location.host}/u/{profile.username}</span>
+                {isOwner && <button onClick={()=>navigator.clipboard?.writeText(`${window.location.host}/u/${profile.username}`)} title="Copiar link" style={{ background:"none", border:"none", cursor:"pointer", color:T.textSub, fontSize:13, padding:2 }}>⎘</button>}
+              </div>
+              {profile.bio && <p style={{ margin:"2px 0 0", fontSize:11, color:T.textSub, fontFamily:F.body, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{profile.bio}</p>}
+            </div>
+            {isOwner && (
+              <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                <button onClick={()=>setShowAppearance(true)} title="Aparência" style={{ background:T.chipBg, border:"none", borderRadius:10, padding:"9px 11px", cursor:"pointer", color:T.text, fontSize:14 }}>◑</button>
+                <button onClick={()=>setShowAddModal(true)} style={{ background:T.accentGrad, color:"#fff", border:"none", borderRadius:10, padding:"9px 13px", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:F.heading, whiteSpace:"nowrap" }}>+ Produto</button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display:"flex", gap:16, marginBottom:12 }}>
+            <span style={{ fontSize:12, color:T.textSub, fontFamily:F.body }}><strong style={{ color:T.text, fontFamily:F.heading }}>{products.length}</strong> produtos</span>
+            <span style={{ fontSize:12, color:T.textSub, fontFamily:F.body }}><strong style={{ color:T.text, fontFamily:F.heading }}>{allCategories.length-1}</strong> categorias</span>
+            {isOwner && <button onClick={onSignOut} style={{ marginLeft:"auto", background:"none", border:"none", fontSize:11, color:T.textSub, cursor:"pointer", fontFamily:F.body }}>Sair</button>}
+          </div>
+
+          <div style={{ position:"relative", marginBottom:12 }}>
+            <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:T.textSub, fontSize:14, pointerEvents:"none" }}>⌕</span>
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar produtos..."
+              style={{ width:"100%", padding:"10px 13px 10px 32px", borderRadius:10, border:`2px solid ${T.border}`, fontSize:14, fontFamily:F.body, background:T.bg, color:T.text, outline:"none", transition:"border-color 0.2s" }}
+              onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border} />
+          </div>
+
+          <div style={{ display:"flex", gap:7, overflowX:"auto", paddingBottom:14, scrollbarWidth:"none" }}>
+            {allCategories.map(cat=>(
+              <button key={cat} onClick={()=>setActiveCategory(cat)} style={{ whiteSpace:"nowrap", padding:"6px 13px", borderRadius:20, border:"none", cursor:"pointer", fontSize:12, fontWeight:activeCategory===cat?700:500, fontFamily:F.body, flexShrink:0, transition:"all 0.15s", background:activeCategory===cat?T.chipActive:T.chipBg, color:activeCategory===cat?T.chipActiveText:T.textSub }}>
+                {showEmoji?`${CAT_EMOJI[cat]||"□"} `:""}{cat}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Grid */}
+      <div style={{ maxWidth:640, margin:"0 auto", padding:"14px 14px 48px" }}>
+        {filtered.length===0 ? (
+          <div style={{ textAlign:"center", padding:"60px 20px" }}>
+            <p style={{ fontFamily:F.heading, fontSize:16, fontWeight:700, color:T.textSub, margin:"0 0 4px" }}>{search?"Nenhum produto encontrado":"Nenhum produto ainda"}</p>
+            <p style={{ fontFamily:F.body, fontSize:13, color:T.border, margin:0 }}>{search?`Sem resultados para "${search}"`:"Adicione produtos pela vitrine"}</p>
+            {isOwner && !search && <button onClick={()=>setShowAddModal(true)} style={{ marginTop:14, background:T.accentGrad, color:"#fff", border:"none", borderRadius:10, padding:"10px 20px", cursor:"pointer", fontFamily:F.heading, fontWeight:700, fontSize:13 }}>Adicionar primeiro produto</button>}
+          </div>
+        ) : (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+            {filtered.map((product,i)=>(
+              <div key={product.id} style={{ animation:`fadeUp 0.3s ease ${i*0.04}s both` }}>
+                <ProductCard product={product} onDelete={onDelete} isOwner={isOwner} T={T} F={F} showEmoji={showEmoji} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {isOwner && showAddModal && <AddProductModal onAdd={onAdd} onClose={()=>setShowAddModal(false)} T={T} F={F} />}
+      {isOwner && showAppearance && <AppearancePanel theme={theme} fonts={fonts} showEmoji={showEmoji} onChange={onAppearanceChange} onClose={()=>setShowAppearance(false)} T={T} F={F} />}
+    </div>
+  );
+}
+
+// ─── Public Profile Page ───────────────────────────────────────────────────────
+function PublicPage({ username }) {
+  const [profile, setProfile] = useState(null);
+  const [products, setProducts] = useState([]);
+  const [notFound, setNotFound] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const p = await supa.getProfileByUsername(username);
+      if (!p) { setNotFound(true); setReady(true); return; }
+      setProfile(p);
+      const prods = await supa.getProducts(p.id);
+      setProducts(prods || []);
+      setReady(true);
+    })();
+  }, [username]);
+
+  if (!ready) return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#f9f8f6" }}>
+      <div style={{ fontSize:36, animation:"spin 1s linear infinite", display:"inline-block" }}>⟳</div>
+      <style>{`@keyframes spin { to { transform:rotate(360deg); } }`}</style>
+    </div>
+  );
+
+  if (notFound) return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#f9f8f6", flexDirection:"column", gap:8 }}>
+      <p style={{ fontFamily:"sans-serif", fontSize:18, fontWeight:700, color:"#888" }}>Perfil não encontrado</p>
+      <p style={{ fontFamily:"sans-serif", fontSize:13, color:"#aaa" }}>@{username}</p>
+    </div>
+  );
+
+  const theme = profile.theme || "laranja";
+  const fonts = profile.fonts || "moderna";
+  const showEmoji = profile.show_emoji || false;
+
+  return <StorefrontView profile={profile} products={products} isOwner={false} theme={theme} fonts={fonts} showEmoji={showEmoji} onDelete={()=>{}} onAdd={()=>{}} onAppearanceChange={()=>{}} onSignOut={()=>{}} />;
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [authUser, setAuthUser]   = useState(null);   // Supabase auth user
-  const [profile, setProfile]     = useState(null);   // app profile row
-  const [authReady, setAuthReady] = useState(false);  // finished checking session
+  // Route detection
+  const pathMatch = window.location.pathname.match(/^\/u\/([^/]+)/);
+  if (pathMatch) return <PublicPage username={pathMatch[1]} />;
+
+  const [authUser, setAuthUser]   = useState(null);
+  const [profile, setProfile]     = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [products, setProducts]   = useState(DEMO_PRODUCTS);
-  const [search, setSearch]       = useState("");
-  const [activeCategory, setActiveCategory] = useState("Todos");
-  const [showAddModal, setShowAddModal]   = useState(false);
-  const [showAppearance, setShowAppearance] = useState(false);
   const [theme, setTheme]     = useState("laranja");
   const [fonts, setFonts]     = useState("moderna");
   const [showEmoji, setShowEmoji] = useState(false);
 
-  const T = THEMES[theme];
-  const F = FONT_PAIRS[fonts];
-
   // ── Restore session on load ──
   useEffect(() => {
     async function restoreSession() {
-      // Try stored token
       const storedToken = localStorage.getItem("sb_token");
       const storedRefresh = localStorage.getItem("sb_refresh");
       if (storedToken) {
@@ -512,7 +707,6 @@ export default function App() {
         const user = await supa.getUser(storedToken);
         if (user?.id) { supa._userId = user.id; await loadProfile(user); return; }
         supa._token = null;
-        // Token expired, try refresh
         if (storedRefresh) {
           const d = await supa.refreshSession(storedRefresh);
           if (d.user) { await loadProfile(d.user); return; }
@@ -538,7 +732,6 @@ export default function App() {
     setAuthReady(true);
   }
 
-  // Sync appearance to DB
   useEffect(() => {
     if (!profile?.id) return;
     const t = setTimeout(() => supa.updateProfile(profile.id, { theme, fonts, show_emoji:showEmoji }), 800);
@@ -570,14 +763,6 @@ export default function App() {
     setProducts(DEMO_PRODUCTS);
   }
 
-  const allCategories = ["Todos", ...Array.from(new Set(products.map(p=>p.category).filter(Boolean)))];
-  const filtered = products.filter(p => {
-    const matchCat = activeCategory==="Todos"||p.category===activeCategory;
-    const matchSearch = !search||p.title.toLowerCase().includes(search.toLowerCase())||p.category?.toLowerCase().includes(search.toLowerCase());
-    return matchCat && matchSearch;
-  });
-
-  // ── Loading ──
   if (!authReady) return (
     <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#f9f8f6" }}>
       <div style={{ textAlign:"center" }}>
@@ -587,90 +772,8 @@ export default function App() {
     </div>
   );
 
-  // ── Not logged in ──
   if (!authUser) return <AuthScreen onAuth={user => loadProfile(user)} />;
-
-  // ── Logged in but no profile yet ──
   if (!profile) return <ProfileSetup user={authUser} onSave={p => { setProfile(p); setProducts([]); }} />;
 
-  // ── Main storefront ──
-  return (
-    <div style={{ minHeight:"100vh", background:T.bg, fontFamily:F.body }}>
-      <style>{`
-        @import url('${F.import}');
-        * { box-sizing:border-box; }
-        ::-webkit-scrollbar { width:4px; height:4px; }
-        ::-webkit-scrollbar-thumb { background:${T.scrollThumb}; border-radius:4px; }
-        ::-webkit-scrollbar-track { background:transparent; }
-        @keyframes spin { to { transform:rotate(360deg); } }
-        @keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
-      `}</style>
-
-      {/* Header */}
-      <div style={{ background:T.header, borderBottom:`1px solid ${T.border}`, padding:"18px 16px 0", position:"sticky", top:0, zIndex:50 }}>
-        <div style={{ maxWidth:640, margin:"0 auto" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
-            {profile.avatar_url
-              ? <img src={profile.avatar_url} alt={profile.name} style={{ width:50, height:50, borderRadius:"50%", objectFit:"cover", border:`2.5px solid ${T.accent}`, flexShrink:0 }} onError={e=>e.target.style.display="none"} />
-              : <Avatar name={profile.name} T={T} F={F} />}
-            <div style={{ flex:1, minWidth:0 }}>
-              <h1 style={{ margin:0, fontFamily:F.heading, fontSize:17, fontWeight:800, color:T.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{profile.name}</h1>
-              <div style={{ display:"flex", alignItems:"center", gap:5, marginTop:1 }}>
-                <span style={{ fontSize:11, color:T.accent, fontWeight:600, fontFamily:F.body }}>vitrine.app/u/{profile.username}</span>
-                <button onClick={()=>navigator.clipboard?.writeText(`vitrine.app/u/${profile.username}`)} title="Copiar link" style={{ background:"none", border:"none", cursor:"pointer", color:T.textSub, fontSize:13, padding:2 }}>⎘</button>
-              </div>
-              {profile.bio && <p style={{ margin:"2px 0 0", fontSize:11, color:T.textSub, fontFamily:F.body, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{profile.bio}</p>}
-            </div>
-            <div style={{ display:"flex", gap:6, flexShrink:0 }}>
-              <button onClick={()=>setShowAppearance(true)} title="Aparência" style={{ background:T.chipBg, border:"none", borderRadius:10, padding:"9px 11px", cursor:"pointer", color:T.text, fontSize:14 }}>◑</button>
-              <button onClick={()=>setShowAddModal(true)} style={{ background:T.accentGrad, color:"#fff", border:"none", borderRadius:10, padding:"9px 13px", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:F.heading, whiteSpace:"nowrap" }}>+ Produto</button>
-            </div>
-          </div>
-
-          <div style={{ display:"flex", gap:16, marginBottom:12 }}>
-            <span style={{ fontSize:12, color:T.textSub, fontFamily:F.body }}><strong style={{ color:T.text, fontFamily:F.heading }}>{products.length}</strong> produtos</span>
-            <span style={{ fontSize:12, color:T.textSub, fontFamily:F.body }}><strong style={{ color:T.text, fontFamily:F.heading }}>{allCategories.length-1}</strong> categorias</span>
-            <button onClick={handleSignOut} style={{ marginLeft:"auto", background:"none", border:"none", fontSize:11, color:T.textSub, cursor:"pointer", fontFamily:F.body }}>Sair</button>
-          </div>
-
-          <div style={{ position:"relative", marginBottom:12 }}>
-            <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:T.textSub, fontSize:14, pointerEvents:"none" }}>⌕</span>
-            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar produtos..."
-              style={{ width:"100%", padding:"10px 13px 10px 32px", borderRadius:10, border:`2px solid ${T.border}`, fontSize:14, fontFamily:F.body, background:T.bg, color:T.text, outline:"none", transition:"border-color 0.2s" }}
-              onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border} />
-          </div>
-
-          <div style={{ display:"flex", gap:7, overflowX:"auto", paddingBottom:14, scrollbarWidth:"none" }}>
-            {allCategories.map(cat=>(
-              <button key={cat} onClick={()=>setActiveCategory(cat)} style={{ whiteSpace:"nowrap", padding:"6px 13px", borderRadius:20, border:"none", cursor:"pointer", fontSize:12, fontWeight:activeCategory===cat?700:500, fontFamily:F.body, flexShrink:0, transition:"all 0.15s", background:activeCategory===cat?T.chipActive:T.chipBg, color:activeCategory===cat?T.chipActiveText:T.textSub }}>
-                {showEmoji?`${CAT_EMOJI[cat]||"□"} `:""}{cat}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Grid */}
-      <div style={{ maxWidth:640, margin:"0 auto", padding:"14px 14px 48px" }}>
-        {filtered.length===0 ? (
-          <div style={{ textAlign:"center", padding:"60px 20px" }}>
-            <p style={{ fontFamily:F.heading, fontSize:16, fontWeight:700, color:T.textSub, margin:"0 0 4px" }}>{search?"Nenhum produto encontrado":"Nenhum produto ainda"}</p>
-            <p style={{ fontFamily:F.body, fontSize:13, color:T.border, margin:0 }}>{search?`Sem resultados para "${search}"`:"Adicione produtos pela vitrine"}</p>
-            {!search && <button onClick={()=>setShowAddModal(true)} style={{ marginTop:14, background:T.accentGrad, color:"#fff", border:"none", borderRadius:10, padding:"10px 20px", cursor:"pointer", fontFamily:F.heading, fontWeight:700, fontSize:13 }}>Adicionar primeiro produto</button>}
-          </div>
-        ) : (
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-            {filtered.map((product,i)=>(
-              <div key={product.id} style={{ animation:`fadeUp 0.3s ease ${i*0.04}s both` }}>
-                <ProductCard product={product} onDelete={handleDeleteProduct} isOwner={true} T={T} F={F} showEmoji={showEmoji} />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {showAddModal && <AddProductModal onAdd={handleAddProduct} onClose={()=>setShowAddModal(false)} T={T} F={F} />}
-      {showAppearance && <AppearancePanel theme={theme} fonts={fonts} showEmoji={showEmoji} onChange={handleAppearance} onClose={()=>setShowAppearance(false)} T={T} F={F} />}
-    </div>
-  );
+  return <StorefrontView profile={profile} products={products} isOwner={true} theme={theme} fonts={fonts} showEmoji={showEmoji} onDelete={handleDeleteProduct} onAdd={handleAddProduct} onAppearanceChange={handleAppearance} onSignOut={handleSignOut} />;
 }
