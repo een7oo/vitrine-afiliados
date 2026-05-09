@@ -22,6 +22,7 @@ const supa = {
       body: JSON.stringify({ email, password })
     });
     const d = await r.json();
+    if (r.status === 429) throw new Error("Muitas tentativas. Aguarde alguns minutos e tente novamente.");
     if (!r.ok || d.error || d.error_code) throw new Error(d.msg || d.error_description || d.error?.message || "Erro ao criar conta");
     if (d.access_token) { this._token = d.access_token; this._userId = d.user?.id; }
     return d;
@@ -32,6 +33,7 @@ const supa = {
       body: JSON.stringify({ email, password })
     });
     const d = await r.json();
+    if (r.status === 429) throw new Error("Muitas tentativas. Aguarde alguns minutos e tente novamente.");
     if (!r.ok || d.error || d.error_code) throw new Error(d.msg || d.error_description || d.error?.message || "E-mail ou senha incorretos");
     this._token = d.access_token;
     this._userId = d.user?.id;
@@ -55,6 +57,11 @@ const supa = {
   },
   async getUser(token) {
     const r = await fetch(`${SUPA_URL}/auth/v1/user`, { headers: h(token) });
+    if (r.status === 403 || r.status === 401) {
+      localStorage.removeItem("sb_token");
+      localStorage.removeItem("sb_refresh");
+      return null;
+    }
     return r.json();
   },
   signOut() {
@@ -504,6 +511,7 @@ export default function App() {
         supa._token = storedToken;
         const user = await supa.getUser(storedToken);
         if (user?.id) { supa._userId = user.id; await loadProfile(user); return; }
+        supa._token = null;
         // Token expired, try refresh
         if (storedRefresh) {
           const d = await supa.refreshSession(storedRefresh);
