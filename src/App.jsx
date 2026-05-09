@@ -22,7 +22,7 @@ const supa = {
       body: JSON.stringify({ email, password })
     });
     const d = await r.json();
-    if (d.error) throw new Error(d.error.message || d.msg || "Erro ao criar conta");
+    if (!r.ok || d.error || d.error_code) throw new Error(d.msg || d.error_description || d.error?.message || "Erro ao criar conta");
     if (d.access_token) { this._token = d.access_token; this._userId = d.user?.id; }
     return d;
   },
@@ -32,7 +32,7 @@ const supa = {
       body: JSON.stringify({ email, password })
     });
     const d = await r.json();
-    if (d.error) throw new Error(d.error.message || d.msg || "E-mail ou senha incorretos");
+    if (!r.ok || d.error || d.error_code) throw new Error(d.msg || d.error_description || d.error?.message || "E-mail ou senha incorretos");
     this._token = d.access_token;
     this._userId = d.user?.id;
     localStorage.setItem("sb_token", d.access_token);
@@ -183,6 +183,7 @@ function AuthScreen({ onAuth }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showPwd, setShowPwd] = useState(false);
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
@@ -234,9 +235,14 @@ function AuthScreen({ onAuth }) {
           </div>
           <div style={{ marginBottom:16 }}>
             <label style={{ display:"block", fontSize:11, fontWeight:700, color:T.textSub, marginBottom:5, fontFamily:F.body, letterSpacing:0.6 }}>SENHA</label>
-            <input value={password} onChange={e=>setPassword(e.target.value)} placeholder={mode==="signup"?"Mínimo 6 caracteres":"••••••••"} type="password" style={is}
-              onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border}
-              onKeyDown={e=>e.key==="Enter"&&handleEmailAuth()} />
+            <div style={{ position:"relative" }}>
+              <input value={password} onChange={e=>setPassword(e.target.value)} placeholder={mode==="signup"?"Mínimo 6 caracteres":"••••••••"} type={showPwd?"text":"password"} style={{ ...is, paddingRight:42 }}
+                onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border}
+                onKeyDown={e=>e.key==="Enter"&&handleEmailAuth()} />
+              <button type="button" onClick={()=>setShowPwd(v=>!v)} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:T.textSub, fontSize:15, padding:0, lineHeight:1 }}>
+                {showPwd ? "🙈" : "👁"}
+              </button>
+            </div>
           </div>
 
           {err && <p style={{ color:"#ef4444", fontSize:13, margin:"-4px 0 12px", fontFamily:F.body }}>{err}</p>}
