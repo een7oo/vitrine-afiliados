@@ -99,6 +99,34 @@ async function fetchML(url) {
   return null;
 }
 
+async function fetchShopee(url) {
+  const m = url.match(/[-]i\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  const [, shopId, itemId] = m;
+  try {
+    const r = await fetch(
+      `https://shopee.com.br/api/v4/item/get?itemid=${itemId}&shopid=${shopId}`,
+      { headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://shopee.com.br/",
+        "X-Shopee-Language": "pt-BR",
+        "x-api-source": "pc",
+        "af-ac-enc-dat": "null",
+      }}
+    );
+    if (!r.ok) return null;
+    const d = await r.json();
+    const item = d?.data?.item;
+    if (!item?.name) return null;
+    const price = item.price ? `R$ ${(item.price / 100000).toFixed(2).replace(".", ",")}` : "";
+    const origPrice = item.price_before_discount && item.price_before_discount !== item.price
+      ? `R$ ${(item.price_before_discount / 100000).toFixed(2).replace(".", ",")}` : "";
+    const imgHash = item.image || item.images?.[0];
+    const image = imgHash ? `https://down-br.img.susercontent.com/file/${imgHash}` : "";
+    return { title: item.name, price, original_price: origPrice, image };
+  } catch { return null; }
+}
+
 async function fetchHTML(url) {
   const r = await fetch(url, {
     headers: {
@@ -176,6 +204,11 @@ export default async function handler(req, res) {
     if (platform === "mercadolivre") {
       const ml = await fetchML(url);
       if (ml) return res.json({ ...ml, platform });
+    }
+
+    if (platform === "shopee") {
+      const sh = await fetchShopee(url);
+      if (sh) return res.json({ ...sh, platform });
     }
 
     const html = await fetchHTML(url);
