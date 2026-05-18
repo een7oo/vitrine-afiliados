@@ -188,51 +188,12 @@ function mapCategory(text) {
 async function fetchProductMeta(url) {
   const platform = detectPlatform(url);
   const base = { id: crypto.randomUUID(), title:"", price:"", original_price:"", image:"", category:"Outros", platform, original_url: url };
-
   try {
-    const proxyRes = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
-    if (!proxyRes.ok) return base;
-    const { contents: html } = await proxyRes.json();
-    if (!html) return base;
-
-    const getTag = (...patterns) => {
-      for (const p of patterns) { const m = html.match(p); if (m?.[1]) return decodeHTML(m[1].trim()); }
-      return "";
-    };
-
-    // JSON-LD structured data (most reliable)
-    const ldBlocks = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
-    for (const [, raw] of ldBlocks) {
-      try {
-        let ld = JSON.parse(raw);
-        if (Array.isArray(ld)) ld = ld.find(x => x?.["@type"] === "Product");
-        if (!ld || ld["@type"] !== "Product") continue;
-        const imgRaw = ld.image;
-        const img = imgRaw ? (Array.isArray(imgRaw) ? imgRaw[0] : (typeof imgRaw === "string" ? imgRaw : imgRaw?.url)) : "";
-        let price = "", origPrice = "";
-        const offers = ld.offers ? (Array.isArray(ld.offers) ? ld.offers : [ld.offers]) : [];
-        if (offers.length) {
-          const prices = offers.map(o => parseFloat(o.price)).filter(Boolean).sort((a,b) => a-b);
-          if (prices.length) price = `R$ ${prices[0].toFixed(2).replace(".",",")}`;
-          if (prices.length > 1) origPrice = `R$ ${prices[prices.length-1].toFixed(2).replace(".",",")}`;
-        }
-        const cat = mapCategory((ld.category||"") + " " + (ld.name||""));
-        return { ...base, title: ld.name || "", image: img || "", price, original_price: origPrice, category: cat };
-      } catch {}
-    }
-
-    // OG tags fallback
-    const title = getTag(
-      /property=["']og:title["'][^>]*content=["']([^"']+)/i,
-      /content=["']([^"']+)["'][^>]*property=["']og:title["']/i,
-      /<title[^>]*>([^<]+)<\/title>/i
-    );
-    const image = getTag(
-      /property=["']og:image["'][^>]*content=["']([^"']+)/i,
-      /content=["']([^"']+)["'][^>]*property=["']og:image["']/i
-    );
-    const category = mapCategory(title + " " + url);
-    return { ...base, title, image, category };
+    const r = await fetch(`/api/scrape?url=${encodeURIComponent(url)}`);
+    if (!r.ok) return base;
+    const d = await r.json();
+    if (!d.title && !d.image) return base;
+    return { ...base, ...d, category: mapCategory((d.title || "") + " " + url) };
   } catch {
     return base;
   }
@@ -507,38 +468,95 @@ function AddProductModal({ onAdd, onClose, T, F }) {
   const [manualCat, setManualCat] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [manual, setManual] = useState(null);
   const is = iStyle(T, F);
 
+  const CATS = ["Eletrônicos","Moda","Casa","Beleza","Esportes","Brinquedos","Livros","Alimentos","Outros"];
+
   async function handle() {
-    const trimmed = url.trim();
+    let trimmed = url.trim();
     if (!trimmed) return setErr("Cole o link do produto.");
-    if (!trimmed.startsWith("http")) return setErr("Link inválido.");
+    if (!trimmed.startsWith("http")) trimmed = "https://" + trimmed;
     setErr(""); setLoading(true);
     try {
       const p = await fetchProductMeta(trimmed);
       if (manualCat) p.category = manualCat;
+      if (!p.title && !p.image) {
+        setManual({ title:"", price:"", image:"", original_price:"", category: manualCat || "Outros", platform: p.platform, original_url: trimmed, id: p.id });
+        setLoading(false);
+        return;
+      }
       onAdd(p); onClose();
     } catch { setErr("Não foi possível buscar o produto. Tente novamente."); }
     setLoading(false);
   }
 
-  return (
-    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:300, padding:16, backdropFilter:"blur(4px)" }}>
-      <div style={{ background:T.card, borderRadius:20, padding:26, width:"100%", maxWidth:400 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
-          <h2 style={{ margin:0, fontFamily:F.heading, fontSize:18, fontWeight:800, color:T.text }}>Adicionar Produto</h2>
-          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:20, cursor:"pointer", color:T.textSub }}>✕</button>
+  function handleManualSave() {
+    if (!manual.title.trim()) return setErr("Informe o nome do produto.");
+    onAdd({ ...manual, title: manual.title.trim(), price: manual.price.trim(), image: manual.image.trim() });
+    onClose();
+  }
+
+  const overlay = { position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:300, padding:16, backdropFilter:"blur(4px)" };
+  const box = { background:T.card, borderRadius:20, padding:26, width:"100%", maxWidth:400 };
+  const header = { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 };
+  const closeBtn = { background:"none", border:"none", fontSize:20, cursor:"pointer", color:T.textSub };
+  const labelStyle = { display:"block", fontSize:11, fontWeight:700, color:T.textSub, marginBottom:5, fontFamily:F.body, letterSpacing:0.6 };
+  const addBtn = (disabled) => ({ width:"100%", marginTop:18, padding:13, background:disabled?T.border:T.accentGrad, color:"#fff", border:"none", borderRadius:12, fontSize:14, fontWeight:800, cursor:disabled?"not-allowed":"pointer", fontFamily:F.heading, display:"flex", alignItems:"center", justifyContent:"center", gap:8 });
+
+  if (manual !== null) {
+    return (
+      <div style={overlay}>
+        <div style={box}>
+          <div style={header}>
+            <h2 style={{ margin:0, fontFamily:F.heading, fontSize:18, fontWeight:800, color:T.text }}>Preencha os dados</h2>
+            <button onClick={onClose} style={closeBtn}>✕</button>
+          </div>
+          <p style={{ margin:"0 0 16px", fontSize:12, color:T.textSub, fontFamily:F.body, background:T.chipBg, padding:"8px 12px", borderRadius:8 }}>
+            Não conseguimos buscar automaticamente. Preencha os campos abaixo:
+          </p>
+          {[
+            { label:"NOME DO PRODUTO *", key:"title", ph:"Ex: Fone Bluetooth TWS Pro" },
+            { label:"PREÇO", key:"price", ph:"Ex: R$ 89,90" },
+            { label:"URL DA IMAGEM (opcional)", key:"image", ph:"https://..." },
+          ].map(({ label, key, ph }) => (
+            <div key={key} style={{ marginBottom:12 }}>
+              <label style={labelStyle}>{label}</label>
+              <input value={manual[key]} onChange={e=>setManual(m=>({...m,[key]:e.target.value}))} placeholder={ph} style={is}
+                onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border} />
+            </div>
+          ))}
+          <label style={labelStyle}>CATEGORIA</label>
+          <select value={manual.category} onChange={e=>setManual(m=>({...m,category:e.target.value}))} style={{ ...is, cursor:"pointer", marginBottom:0 }}>
+            {CATS.map(c=><option key={c} value={c}>{c}</option>)}
+          </select>
+          {err && <p style={{ color:"#ef4444", fontSize:13, margin:"10px 0 0", fontFamily:F.body }}>{err}</p>}
+          <button onClick={handleManualSave} style={addBtn(false)}>Adicionar à vitrine</button>
+          <button onClick={()=>setManual(null)} style={{ width:"100%", marginTop:8, padding:10, background:"none", color:T.textSub, border:`1.5px solid ${T.border}`, borderRadius:12, fontSize:13, cursor:"pointer", fontFamily:F.body }}>
+            ← Tentar outro link
+          </button>
         </div>
-        <label style={{ display:"block", fontSize:11, fontWeight:700, color:T.textSub, marginBottom:5, fontFamily:F.body, letterSpacing:0.6 }}>LINK DO PRODUTO *</label>
+      </div>
+    );
+  }
+
+  return (
+    <div style={overlay}>
+      <div style={box}>
+        <div style={header}>
+          <h2 style={{ margin:0, fontFamily:F.heading, fontSize:18, fontWeight:800, color:T.text }}>Adicionar Produto</h2>
+          <button onClick={onClose} style={closeBtn}>✕</button>
+        </div>
+        <label style={labelStyle}>LINK DO PRODUTO *</label>
         <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="Shopee, Mercado Livre, Amazon..." style={is}
           onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.border} />
-        <label style={{ display:"block", fontSize:11, fontWeight:700, color:T.textSub, margin:"14px 0 5px", fontFamily:F.body, letterSpacing:0.6 }}>CATEGORIA (opcional)</label>
+        <label style={{ ...labelStyle, marginTop:14, marginBottom:5 }}>CATEGORIA (opcional)</label>
         <select value={manualCat} onChange={e=>setManualCat(e.target.value)} style={{ ...is, cursor:"pointer" }}>
           <option value="">Detectar automaticamente</option>
-          {["Eletrônicos","Moda","Casa","Beleza","Esportes","Brinquedos","Livros","Alimentos","Outros"].map(c=><option key={c} value={c}>{c}</option>)}
+          {CATS.map(c=><option key={c} value={c}>{c}</option>)}
         </select>
         {err && <p style={{ color:"#ef4444", fontSize:13, margin:"10px 0 0", fontFamily:F.body }}>{err}</p>}
-        <button onClick={handle} disabled={loading} style={{ width:"100%", marginTop:18, padding:13, background:loading?T.border:T.accentGrad, color:"#fff", border:"none", borderRadius:12, fontSize:14, fontWeight:800, cursor:loading?"not-allowed":"pointer", fontFamily:F.heading, display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+        <button onClick={handle} disabled={loading} style={addBtn(loading)}>
           {loading?<><span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>⟳</span>Buscando...</>:"Adicionar à vitrine"}
         </button>
       </div>
