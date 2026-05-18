@@ -15,40 +15,82 @@ function mlFmt(val) {
   return val ? `R$ ${Number(val).toFixed(2).replace(".", ",")}` : "";
 }
 
+async function mlItem(id) {
+  try {
+    const r = await fetch(`https://api.mercadolibre.com/items/${id}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d.title || d.title.toLowerCase().startsWith("mercado")) return null;
+    return {
+      title: d.title,
+      price: mlFmt(d.price),
+      original_price: d.original_price && d.original_price !== d.price ? mlFmt(d.original_price) : "",
+      image: (d.pictures?.[0]?.url || d.thumbnail || "").replace(/-[IV]\.jpg/, "-O.jpg"),
+    };
+  } catch { return null; }
+}
+
 async function fetchML(url) {
-  // Full item ID (10+ digits)
-  const itemMatch = url.match(/MLB-(\d{10,})/i);
-  if (itemMatch) {
+  // 1. wid= param in URL (real item ID, present in affiliate/recommendation links)
+  const widMatch = url.match(/[?&#]wid=(MLB\d+)/i);
+  if (widMatch) { const r = await mlItem(widMatch[1]); if (r) return r; }
+
+  // 2. Direct item ID in path (MLB-1741338063)
+  const pathMatch = url.match(/\/MLB-(\d{8,})/i);
+  if (pathMatch) { const r = await mlItem(`MLB${pathMatch[1]}`); if (r) return r; }
+
+  // 3. Catalog product ID (/p/MLB17413380) — try products endpoint server-side
+  const catalogMatch = url.match(/\/p\/(MLB\d+)/i);
+  if (catalogMatch) {
     try {
-      const r = await fetch(`https://api.mercadolibre.com/items/MLB${itemMatch[1]}`);
+      const r = await fetch(`https://api.mercadolibre.com/products/${catalogMatch[1]}`);
       if (r.ok) {
         const d = await r.json();
-        if (d.title) return {
-          title: d.title,
-          price: mlFmt(d.price),
-          original_price: d.original_price && d.original_price !== d.price ? mlFmt(d.original_price) : "",
-          image: (d.pictures?.[0]?.url || d.thumbnail || "").replace(/-[IV]\.jpg/, "-O.jpg"),
-        };
+        if (d.name && !d.name.toLowerCase().startsWith("mercado")) {
+          const img = d.pictures?.[0]?.url?.replace(/-[IV]\.jpg/, "-O.jpg") || "";
+          const price = d.buy_box_winner?.price ? mlFmt(d.buy_box_winner.price) : "";
+          return { title: d.name, price, original_price: "", image: img };
+        }
       }
     } catch {}
-  }
 
-  // Slug-based text search (works for /p/ catalog URLs too)
-  const slugMatch = url.match(/mercadolibre?\.com\.br\/([^/?#]+)/i);
-  if (slugMatch) {
-    const query = slugMatch[1].replace(/MLB-?\d+/gi, "").replace(/-+/g, " ").trim();
-    if (query.length >= 5) {
-      try {
-        const r = await fetch(`https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(query)}&limit=1`);
-        if (r.ok) {
-          const d = await r.json();
-          const item = d.results?.[0];
-          if (item?.title) return {
+    // 4. Search by catalog_product_id
+    try {
+      const r = await fetch(`https://api.mercadolibre.com/sites/MLB/search?catalog_product_id=${catalogMatch[1]}&limit=1`);
+      if (r.ok) {
+        const d = await r.json();
+        const item = d.results?.[0];
+        if (item?.title && !item.title.toLowerCase().startsWith("mercado")) {
+          return {
             title: item.title,
             price: mlFmt(item.price),
             original_price: item.original_price && item.original_price !== item.price ? mlFmt(item.original_price) : "",
             image: (item.thumbnail || "").replace("-I.jpg", "-O.jpg"),
           };
+        }
+      }
+    } catch {}
+  }
+
+  // 5. Slug text search — strip IDs, use product name words
+  const slugMatch = url.match(/mercadolibre?\.com\.br\/([^/?#]+)/i);
+  if (slugMatch) {
+    const query = slugMatch[1].replace(/MLB-?\d+/gi, "").replace(/-+/g, " ").trim();
+    if (query.length >= 10) {
+      try {
+        const r = await fetch(`https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(query)}&limit=3`);
+        if (r.ok) {
+          const d = await r.json();
+          for (const item of d.results || []) {
+            if (item?.title && !item.title.toLowerCase().startsWith("mercado")) {
+              return {
+                title: item.title,
+                price: mlFmt(item.price),
+                original_price: item.original_price && item.original_price !== item.price ? mlFmt(item.original_price) : "",
+                image: (item.thumbnail || "").replace("-I.jpg", "-O.jpg"),
+              };
+            }
+          }
         }
       } catch {}
     }
